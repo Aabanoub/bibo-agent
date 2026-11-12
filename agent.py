@@ -18,36 +18,30 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 
 CAIRO_TZ = ZoneInfo("Africa/Cairo")
 TODAY = datetime.now(CAIRO_TZ).date()
-HEADERS = {"User-Agent": "BiboDailyVoiceAgent/1.0"}
+HEADERS = {"User-Agent": "bibo-agent/1.0 (https://github.com/Aabanoub/bibo-agent)"}
 
-# 2. Fetch Cairo Weather (Primary: Open-Meteo, Backup: wttr.in — both 100% free)
+# 2. Fetch Cairo Weather (Fast & Free: met.no primary, wttr.in backup)
 def get_weather():
-    # Attempt 1: Open-Meteo
+    # Attempt 1: Norwegian Meteorological Institute (Fast on GitHub Actions, no API key)
     try:
-        url = (
-            "https://api.open-meteo.com/v1/forecast"
-            "?latitude=30.0444&longitude=31.2357"
-            "&current=temperature_2m"
-            "&daily=temperature_2m_max,temperature_2m_min"
-            "&timezone=Africa%2FCairo&forecast_days=1"
-        )
-        res = requests.get(url, headers=HEADERS, timeout=15).json()
-        curr = res["current"]["temperature_2m"]
-        high = res["daily"]["temperature_2m_max"][0]
-        low = res["daily"]["temperature_2m_min"][0]
-        return f"Current: {curr}°C (High: {high}°C, Low: {low}°C)"
+        url = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=30.0444&lon=31.2357"
+        res = requests.get(url, headers=HEADERS, timeout=8).json()
+        timeseries = res["properties"]["timeseries"]
+        curr = timeseries[0]["data"]["instant"]["details"]["air_temperature"]
+        next_temps = [t["data"]["instant"]["details"]["air_temperature"] for t in timeseries[:8]]
+        return f"Current: {curr}°C (High: {max(next_temps)}°C, Low: {min(next_temps)}°C)"
     except Exception as e:
-        print(f"Open-Meteo timed out ({e}), switching to backup weather...")
+        print(f"Primary weather skipped ({e}), trying backup...")
 
     # Attempt 2: wttr.in Backup
     try:
-        res = requests.get("https://wttr.in/Cairo?format=j1", headers=HEADERS, timeout=15).json()
+        res = requests.get("https://wttr.in/Cairo?format=j1", headers=HEADERS, timeout=8).json()
         curr = res["current_condition"][0]["temp_C"]
         high = res["weather"][0]["maxtempC"]
         low = res["weather"][0]["mintempC"]
         return f"Current: {curr}°C (High: {high}°C, Low: {low}°C)"
     except Exception as e:
-        print(f"Backup weather warning: {e}")
+        print(f"Backup weather skipped ({e})")
         return "Weather forecast unavailable today."
 
 # 3. Fetch Today's Google Calendar Events
@@ -80,7 +74,7 @@ def get_todoist_tasks():
             "https://api.todoist.com/rest/v2/tasks",
             params={"filter": "today | overdue"},
             headers=headers,
-            timeout=15
+            timeout=10
         )
         if res.status_code != 200:
             return "No tasks loaded."
@@ -96,7 +90,7 @@ def generate_voice_script(weather, events, tasks):
         raise ValueError("Missing GEMINI_API_KEY in GitHub Secrets!")
     client = genai.Client(api_key=GEMINI_API_KEY)
     prompt = f"""
-    You are a friendly, energetic personal assistant. Write a 45-second spoken morning briefing 
+    You are a friendly, energetic personal assistant for Bibo. Write a 45-second spoken morning briefing 
     for today ({TODAY.strftime('%A, %B %d, %Y')}).
     Write strictly for spoken audio (Text-to-Speech). Do NOT use markdown, asterisks (*), or bullet points.
 
