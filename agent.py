@@ -20,26 +20,24 @@ CAIRO_TZ = ZoneInfo("Africa/Cairo")
 TODAY = datetime.now(CAIRO_TZ).date()
 HEADERS = {"User-Agent": "bibo-agent/1.0 (https://github.com/Aabanoub/bibo-agent)"}
 
-# 2. Fetch Cairo Weather (Fast & Free: met.no primary, wttr.in backup)
+# 2. Fetch Cairo Weather
 def get_weather():
-    # Attempt 1: Norwegian Meteorological Institute (Fast on GitHub Actions, no API key)
     try:
         url = "https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=30.0444&lon=31.2357"
         res = requests.get(url, headers=HEADERS, timeout=8).json()
         timeseries = res["properties"]["timeseries"]
         curr = timeseries[0]["data"]["instant"]["details"]["air_temperature"]
         next_temps = [t["data"]["instant"]["details"]["air_temperature"] for t in timeseries[:8]]
-        return f"Current: {curr}°C (High: {max(next_temps)}°C, Low: {min(next_temps)}°C)"
+        return f"Current: {curr}°C, High: {max(next_temps)}°C, Low: {min(next_temps)}°C"
     except Exception as e:
         print(f"Primary weather skipped ({e}), trying backup...")
 
-    # Attempt 2: wttr.in Backup
     try:
         res = requests.get("https://wttr.in/Cairo?format=j1", headers=HEADERS, timeout=8).json()
         curr = res["current_condition"][0]["temp_C"]
         high = res["weather"][0]["maxtempC"]
         low = res["weather"][0]["mintempC"]
-        return f"Current: {curr}°C (High: {high}°C, Low: {low}°C)"
+        return f"Current: {curr}°C, High: {high}°C, Low: {low}°C"
     except Exception as e:
         print(f"Backup weather skipped ({e})")
         return "Weather forecast unavailable today."
@@ -84,8 +82,8 @@ def get_todoist_tasks():
         print(f"Todoist warning: {e}")
         return "Could not load tasks today."
 
-# 5. Summarize with Gemini
-def generate_voice_script(weather, events, tasks):
+# 5. Summarize with Gemini (25s Timeout + Model Fallback + Offline Safety Net)
+async def generate_voice_script(weather, events, tasks):
     if not GEMINI_API_KEY:
         raise ValueError("Missing GEMINI_API_KEY in GitHub Secrets!")
     client = genai.Client(api_key=GEMINI_API_KEY)
@@ -98,17 +96,52 @@ def generate_voice_script(weather, events, tasks):
     Calendar Schedule: {events}
     Tasks Due Today: {tasks}
     """
-    response = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-    )
-    return response.text
 
-# 6. Convert Text to Telegram Voice Note (.ogg Opus)
+    models_to_try = [
+        "gemini-3.8-flash",
+        "gemini-3.8-flash-lite",
+        "gemini-flash-latest",
+    ]
+
+    for model_name in models_to_try:
+        try:
+            print(f"Trying model: {model_name}...")
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=prompt,
+                ),
+                timeout=25,
+            )
+            if response and response.text:
+                return response.text
+        except Exception as e:
+            print(f"Model {model_name} unavailable ({e}), switching to next...")
+
+    # Safety-net spoken summary if all Gemini models have temporary 503 traffic spikes
+    clean_events = events.replace("- ", "")
+    clean_tasks = tasks.replace("- ", "")
+    return (
+        f"Good morning Bibo! Today is {TODAY.strftime('%A, %B %d')}. "
+        f"Here is your Cairo weather: {weather}. "
+        f"For your schedule today: {clean_events}. "
+        f"And for your tasks: {clean_tasks}. Have a great and productive day!"
+    )
+
+# 6. Convert Text to Telegram Voice Note (.ogg Opus) with 25s Timeout
 async def text_to_ogg(script_text):
     voice = "en-US-AndrewNeural"
-    communicate = edge_tts.Communicate(script_text, voice)
-    await communicate.save("briefing.mp3")
+    for attempt in range(1, 3):
+        try:
+            communicate = edge_tts.Communicate(script_text, voice)
+            await asyncio.wait_for(communicate.save("briefing.mp3"), timeout=25)
+            break
+        except asyncio.TimeoutError:
+            print(f"edge-tts timed out on attempt {attempt}, retrying...")
+            if attempt == 2:
+                raise RuntimeError("edge-tts timed out twice.")
+
     subprocess.run([
         "ffmpeg", "-y", "-i", "briefing.mp3",
         "-c:a", "libopus", "-b:a", "32k", "-vbr", "on",
@@ -138,7 +171,7 @@ async def main():
     print("3/5 Fetching tasks...")
     tasks = get_todoist_tasks()
     print("4/5 Generating Gemini script...")
-    script = generate_voice_script(weather, events, tasks)
+    script = await generate_voice_script(weather, events, tasks)
     print("5/5 Generating audio & sending to Telegram...")
     await text_to_ogg(script)
     send_telegram_voice()
