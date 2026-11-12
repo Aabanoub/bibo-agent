@@ -1,0 +1,32 @@
+name: Daily Telegram Voice Briefing
+
+on:
+  schedule:
+    # Runs at 05:00 UTC every day (07:00 AM Cairo Time)
+    - cron: '0 5 * * *'
+  workflow_dispatch: # Lets you test it anytime with 1 click!
+
+jobs:
+  send-briefing:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python dependencies
+        run: |
+          pip install requests icalendar recurring-ical-events edge-tts google-genai
+
+      - name: Run Daily Voice Agent
+        env:
+          ICAL_URL: ${{ secrets.ICAL_URL }}
+          TODOIST_TOKEN: ${{ secrets.TODOIST_TOKEN }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python agent.py
